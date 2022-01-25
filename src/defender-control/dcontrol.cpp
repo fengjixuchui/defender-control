@@ -34,7 +34,7 @@ namespace dcontrol
     // https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
     // The state of global data maintained by dynamic-link libraries 
     // (DLLs) may be compromised if TerminateProcess is used rather than ExitProcess.
-    // e.g. Injecting code to execute ExitProcess
+    // e.g. Injecting code to execute ExitProcess and manually unloaded everything 
 
     TerminateProcess(proc, 0);
 
@@ -42,9 +42,9 @@ namespace dcontrol
       CloseHandle(proc);
   }
 
-  // Stop or run the windefend service
-  //
-  bool manage_windefend(bool enable)
+  // TODO: create a single function
+
+  bool manage_security_service(bool enable, std::string service_name)
   {
     auto sc_manager = OpenSCManagerA(0, 0, SC_MANAGER_CONNECT);
 
@@ -53,7 +53,7 @@ namespace dcontrol
 
     auto service = OpenServiceA(
       sc_manager,
-      "WinDefend",
+      service_name.c_str(),
       enable ? SERVICE_ALL_ACCESS :
       (SERVICE_CHANGE_CONFIG | SERVICE_STOP | DELETE)
     );
@@ -63,9 +63,6 @@ namespace dcontrol
       CloseServiceHandle(sc_manager);
       return false;
     }
-
-    // TODO: Add a better implementation
-    // https://docs.microsoft.com/en-us/windows/win32/services/starting-a-service
 
     if (enable)
     {
@@ -78,14 +75,14 @@ namespace dcontrol
         0, 0, 0, 0, 0, 0, 0
       ))
       {
-        throw std::runtime_error("Failed to modify windefend service" + std::to_string(GetLastError()));
+        throw std::runtime_error("Failed to modify " + service_name + " " + std::to_string(GetLastError()));
         return false;
       }
 
       // Start the service
       if (!StartServiceA(service, 0, NULL))
       {
-        throw std::runtime_error("Failed to start service");
+        throw std::runtime_error("Failed to start " + service_name);
         return false;
       }
     }
@@ -101,7 +98,7 @@ namespace dcontrol
           return true;
 
         throw std::runtime_error(
-          "Failed to stop windefend service " + std::to_string(last_error)
+          "Failed to stop " + service_name + " " + std::to_string(last_error)
         );
         return false;
       }
@@ -116,7 +113,7 @@ namespace dcontrol
       ))
       {
         throw std::runtime_error(
-          "Failed to modify windefend service" + std::to_string(GetLastError())
+          "Failed to modify " + service_name + " " + std::to_string(GetLastError())
         );
 
         return false;
@@ -127,10 +124,51 @@ namespace dcontrol
       Sleep(3000);
     }
 
-    CloseServiceHandle(service);
-    CloseServiceHandle(sc_manager);
+    return true;
+  }
+
+  // Stop or run security center (wscvc)
+  // The default value is autostart
+  //
+  bool manage_security_center(bool enable)
+  {
+    // handle registry calls
+    // https://superuser.com/questions/1199112/how-to-tell-the-state-of-a-service-from-the-registry
+    // https://stackoverflow.com/questions/291519/how-does-currentcontrolset-differ-from-controlset001-and-controlset002
+    // https://web.archive.org/web/20110514163940/http://support.microsoft.com/kb/103000
+    //
+
+    // auto ret = manage_security_service(enable, "wscsvc");
+
+    HKEY hkey;
+    if (reg::create_registry(L"SYSTEM\\CurrentControlSet\\Services\\wscsvc", hkey))
+    {
+      if (enable)
+      {
+        if (!reg::set_keyval(hkey, L"Start", 2)) // Automatic
+        {
+          printf("failed to write to wscsvc\n");
+          return false;
+        }
+      }
+      else
+      {
+        if (!reg::set_keyval(hkey, L"Start", 4)) // Disabled
+        {
+          printf("failed to write to wscsvc\n");
+          return false;
+        }
+      }
+    }
 
     return true;
+  }
+
+  // Stop or run the windefend service
+  //
+  bool manage_windefend(bool enable)
+  {
+    return manage_security_service(enable, "WinDefend");
   }
 
   // Disables window defender
@@ -266,9 +304,7 @@ namespace dcontrol
     // Protected by anti-tamper
     // Start (3 off) (2 on)
     if (reg::create_registry(L"SYSTEM\\CurrentControlSet\\Services\\WinDefend", hkey))
-    {
       reg::set_keyval(hkey, L"Start", 2);
-    }
     else
       printf("Failed to access CurrentControlSet\n");
 
@@ -318,6 +354,7 @@ namespace dcontrol
     delete helper;
 
     manage_windefend(true);
+    manage_security_center(true);
 
     return true;
   }
